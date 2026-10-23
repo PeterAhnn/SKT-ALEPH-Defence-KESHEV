@@ -183,7 +183,162 @@ export function createStudentView() {
       appendText('p', `판정 시각: ${safeText(data?.checkedAt, '시각을 확인할 수 없습니다.')}`);
       return root;
     },
-    renderEvents() { return '학생 구현 대기: 본인 접속·XDR 기록을 연결하세요.'; },
+    renderEvents({ status, mode, data, error } = {}) {
+      const root = document.createElement('div');
+      const appendText = (parent, tag, text) => {
+        const node = document.createElement(tag);
+        node.textContent = text;
+        parent.append(node);
+        return node;
+      };
+      const modeLabels = { demo: '예제 자료', disconnected: '연결 없음', unknown: '확인 불가' };
+      if (Object.hasOwn(modeLabels, mode)) appendText(root, 'p', `연결 모드: ${modeLabels[mode]}`);
+
+      if (status === 'loading') {
+        appendText(root, 'p', '기록을 불러오는 중');
+        return root;
+      }
+      if (status === 'error') {
+        const message = typeof error?.message === 'string' && error.message.length > 0
+          ? error.message
+          : '서버가 오류 메시지를 제공하지 않았습니다.';
+        if (error?.code === 'CONTRACT_MISMATCH') appendText(root, 'p', `확인 불가: ${message}`);
+        else appendText(root, 'p', `기록을 불러오지 못했습니다: ${message}`);
+        return root;
+      }
+      if (status !== 'ok' || !Array.isArray(data)) {
+        appendText(root, 'p', '확인 불가: 기록 응답을 확인할 수 없습니다.');
+        return root;
+      }
+
+      // 정렬은 전달된 배열을 복사한 뒤 수행한다. 서버/호출자 소유 배열은 변경하지 않는다.
+      const events = [...data].sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
+      const countNode = appendText(root, 'p', `표시 0건 / 받은 기록 ${events.length}건`);
+      if (events.length === 0) {
+        appendText(root, 'p', '표시할 기록이 없습니다');
+        return root;
+      }
+      const kindLabels = { access: '접속 기록', xdr: 'XDR 경보' };
+      const accessLabels = { allowed: '접근 허용', denied: '접근 거부', unknown: '확인 불가' };
+      const sessionLabels = { active: '활성', expired: '만료', revoked: '철회됨', unknown: '확인 불가' };
+      const deviceLabels = { compliant: '보안 기준 충족', noncompliant: '보안 기준 미충족', unknown: '확인 불가' };
+      const displayState = (labels, value) => {
+        const code = typeof value === 'string' ? value : 'unknown';
+        const label = Object.hasOwn(labels, code) ? labels[code] : '확인 불가';
+        return `${label}(${code})`;
+      };
+      const uniqueValues = (values) => [...new Set(values.filter((value) => typeof value === 'string' && value.length > 0))]
+        .sort((a, b) => a.localeCompare(b));
+      const filters = { kind: 'all', appId: 'all', access: 'all' };
+      let selectedEventId = null;
+
+      const filterPanel = document.createElement('div');
+      const listPanel = document.createElement('ul');
+      const detailPanel = document.createElement('div');
+      root.append(filterPanel, listPanel, detailPanel);
+
+      const makeFilter = (labelText, id, values, selected, labelForValue, onChange) => {
+        const label = document.createElement('label');
+        label.textContent = `${labelText}: `;
+        const select = document.createElement('select');
+        select.setAttribute('aria-label', labelText);
+        select.name = id;
+        const allOption = document.createElement('option');
+        allOption.value = 'all';
+        allOption.textContent = '전체';
+        select.append(allOption);
+        for (const value of values) {
+          const option = document.createElement('option');
+          option.value = value;
+          option.textContent = labelForValue(value);
+          select.append(option);
+        }
+        select.value = selected;
+        select.addEventListener('change', () => onChange(select.value));
+        label.append(select);
+        filterPanel.append(label);
+      };
+
+      makeFilter('기록 종류', 'event-kind', uniqueValues(events.map((event) => event.kind)), filters.kind,
+        (value) => `${Object.hasOwn(kindLabels, value) ? kindLabels[value] : '확인 불가'}(${value})`,
+        (value) => { filters.kind = value; selectedEventId = null; renderFilteredEvents(); });
+      makeFilter('업무 앱', 'event-app', uniqueValues(events.map((event) => event.appId)), filters.appId,
+        (value) => value,
+        (value) => { filters.appId = value; selectedEventId = null; renderFilteredEvents(); });
+      makeFilter('접속 상태', 'event-access', uniqueValues(events.map((event) => event.state.access)), filters.access,
+        (value) => displayState(accessLabels, value),
+        (value) => { filters.access = value; selectedEventId = null; renderFilteredEvents(); });
+
+      const renderDetail = (event) => {
+        detailPanel.replaceChildren();
+        if (!event) return;
+        const detail = document.createElement('section');
+        detail.setAttribute('data-student-event-detail', String(event.id));
+        appendText(detail, 'h3', `${String(event.id)} 상세`);
+        appendText(detail, 'p', `사건 ID: ${String(event.id)}`);
+        appendText(detail, 'p', `앱 ID: ${typeof event.appId === 'string' ? event.appId : '앱을 확인할 수 없습니다.'}`);
+
+        appendText(detail, 'h4', '근거');
+        if (event.evidence.length === 0) appendText(detail, 'p', '근거가 없습니다.');
+        else {
+          const evidenceList = document.createElement('ul');
+          for (const item of event.evidence) appendText(evidenceList, 'li', `${String(item.id)}: ${String(item.text)}`);
+          detail.append(evidenceList);
+        }
+
+        appendText(detail, 'h4', '규칙');
+        if (event.rules.length === 0) appendText(detail, 'p', '규칙이 없습니다.');
+        else {
+          const rulesList = document.createElement('ul');
+          for (const item of event.rules) appendText(rulesList, 'li', `${String(item.id)}: ${String(item.text)}`);
+          detail.append(rulesList);
+        }
+
+        appendText(detail, 'h4', '상태');
+        appendText(detail, 'p', `접속: ${displayState(accessLabels, event.state.access)}`);
+        appendText(detail, 'p', `세션: ${displayState(sessionLabels, event.state.session)}`);
+        appendText(detail, 'p', `기기: ${displayState(deviceLabels, event.state.device)}`);
+        detailPanel.append(detail);
+      };
+
+      function renderFilteredEvents() {
+        const visibleEvents = events.filter((event) =>
+          (filters.kind === 'all' || event.kind === filters.kind)
+          && (filters.appId === 'all' || event.appId === filters.appId)
+          && (filters.access === 'all' || event.state.access === filters.access));
+        countNode.textContent = `표시 ${visibleEvents.length}건 / 받은 기록 ${events.length}건`;
+        listPanel.replaceChildren();
+        if (visibleEvents.length === 0) {
+          appendText(listPanel, 'li', '필터와 일치하는 기록이 없습니다.');
+          renderDetail(null);
+          return;
+        }
+        for (const event of visibleEvents) {
+          const row = document.createElement('li');
+          row.setAttribute('data-student-event-id', String(event.id));
+          appendText(row, 'p', `사건 ID: ${String(event.id)}`);
+          appendText(row, 'p', `시각: ${String(event.at)}`);
+          const kind = typeof event.kind === 'string' ? event.kind : 'unknown';
+          appendText(row, 'p', `종류: ${Object.hasOwn(kindLabels, kind) ? kindLabels[kind] : '확인 불가'}(${kind})`);
+          appendText(row, 'p', `앱: ${typeof event.appId === 'string' ? event.appId : '앱을 확인할 수 없습니다.'}`);
+          appendText(row, 'p', `요약: ${String(event.summary)}`);
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.textContent = `${String(event.id)} 상세`;
+          button.setAttribute('aria-label', `${String(event.id)} 상세`);
+          button.addEventListener('click', () => {
+            selectedEventId = event.id;
+            renderDetail(event);
+          });
+          row.append(button);
+          listPanel.append(row);
+        }
+        renderDetail(visibleEvents.find((event) => event.id === selectedEventId) || null);
+      }
+
+      renderFilteredEvents();
+      return root;
+    },
     renderStatus() { return '학생 구현 대기: 기기·세션·알림과 연결 점검 상태를 구분하세요.'; },
     renderVulnerabilities() { return '학생 구현 대기: 정확한 설치 버전·OSV 출처·조회 시각·부분 결과·조회 실패를 구분하세요.'; },
     renderAiConnection() { return '학생 구현 대기: 모델 응답 점검과 실제 사건 설명을 구분하고 AI 오류·취소·수동 복구를 안내하세요.'; },
